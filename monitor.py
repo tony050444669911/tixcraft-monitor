@@ -210,7 +210,7 @@ def parse_status(html: str) -> tuple[str, list[dict]]:
 
 
 def format_ticket_notification(areas: list[dict], ts: str) -> str:
-    lines = ["🎫 <b>拓元票務通知 — 有票可搶！</b>", f"時間：{ts}\n", "<b>目前有票的區域：</b>"]
+    lines = ["🚨🚨🚨 <b>有票！快搶！快搶！快搶！</b> 🚨🚨🚨", f"時間：{ts}\n", "<b>目前有票的區域：</b>"]
     for a in areas:
         parts = []
         if a["remaining"] is not None:
@@ -221,15 +221,6 @@ def format_ticket_notification(areas: list[dict], ts: str) -> str:
         lines.append(f"・{a['name']}{detail}")
     lines.append(f"\n🔗 <a href=\"{TARGET_URL}\">點我立即搶票</a>")
     return "\n".join(lines)
-
-
-def format_status_change(status: str, prev: str, ts: str) -> str:
-    return (
-        f"🎫 <b>拓元票務通知</b>\n"
-        f"狀態變更：{prev} → {status}\n\n"
-        f'🔗 <a href="{TARGET_URL}">點我立即搶票</a>\n\n'
-        f"時間：{ts}"
-    )
 
 
 def format_pity(elapsed_hours: float, ts: str) -> str:
@@ -328,9 +319,13 @@ def main():
                         last_status = status
                         log.info(f"初始狀態：{status}")
                     elif status != last_status:
-                        msg = format_status_change(status, last_status, ts)
-                        send_telegram(msg)
-                        log.info(f"狀態變更：{last_status} → {status}")
+                        # 只有「尚未開賣」這種重要狀態才通知，其他沒票的變化不打擾
+                        if status == "尚未開賣":
+                            send_telegram(
+                                f"📢 售票狀態：{status}\n\n"
+                                f'🔗 <a href="{TARGET_URL}">售票頁面</a>\n時間：{ts}'
+                            )
+                        log.info(f"狀態變更：{last_status} → {status}（不通知）")
                         last_status = status
                     else:
                         log.info("狀態無變化")

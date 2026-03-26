@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import signal
 import logging
 import requests
 from bs4 import BeautifulSoup
@@ -258,6 +259,23 @@ def check_once(driver=None):
 FAIL_STATUS = "抓取失敗"
 
 
+def setup_shutdown_handler():
+    """收到系統關機/終止信號時，先發 Telegram 通知再結束"""
+    def handler(signum, frame):
+        ts = now_str()
+        msg = (
+            f"⚠️ <b>監控腳本已停止！</b>\n"
+            f"電腦可能關機或腳本被中斷，請記得重新啟動！\n\n"
+            f'🔗 <a href="{TARGET_URL}">售票頁面</a>\n'
+            f"時間：{ts}"
+        )
+        log.warning("收到終止信號，發送停止通知...")
+        send_telegram(msg)
+        raise SystemExit(0)
+
+    signal.signal(signal.SIGTERM, handler)  # 系統關機、kill 指令
+
+
 def main():
     global last_status, last_ticket_time, last_pity_time
 
@@ -265,6 +283,7 @@ def main():
         log.error("請確認 .env 已設定 TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID、TARGET_URL")
         return
 
+    setup_shutdown_handler()
     log.info(f"監控開始，目標：{TARGET_URL}")
     log.info(f"每分鐘第 {CHECK_SECOND} 秒執行檢查，身障/輪椅區不通知")
 

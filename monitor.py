@@ -4,7 +4,9 @@ import sys
 import time
 import signal
 import logging
+import subprocess
 import requests
+import psutil
 from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
@@ -20,6 +22,12 @@ NO_TICKET_ALERT = 3600  # 連續幾秒沒票就發憐憫通知（1 小時）
 
 # 身障/輪椅區關鍵字 → 忽略這些區域
 DISABILITY_KEYWORDS = ["身障", "輪椅", "殘障", "身心障礙"]
+
+# 電量警告門檻
+BATTERY_WARN_30 = 30
+BATTERY_WARN_15 = 15
+BATTERY_CRITICAL_10 = 10
+USER_IDLE_THRESHOLD = 300  # 超過幾秒沒操作視為「沒人在用」（5 分鐘）
 
 MAX_RETRY = 3
 
@@ -283,6 +291,103 @@ def release_lock():
         pass
 
 
+def get_idle_seconds() -> float:
+    """取得 macOS 系統閒置秒數（上次鍵盤/滑鼠動作距今）"""
+    try:
+        result = subprocess.run(
+            ["ioreg", "-c", "IOHIDSystem"],
+            capture_output=True, text=True
+        )
+        for line in result.stdout.splitlines():
+            if "HIDIdleTime" in line:
+                ns = int(line.split("=")[-1].strip())
+                return ns / 1_000_000_000  # 奈秒 → 秒
+    except Exception:
+        pass
+    return 0
+
+
+def is_user_active() -> bool:
+    return get_idle_seconds() < USER_IDLE_THRESHOLD
+
+
+def check_battery(notified: set) -> set:
+    """
+    檢查電量，依狀況發通知或讓筆電睡眠。
+    notified：已發過通知的門檻集合（避免重複），充電後清空。
+    回傳更新後的 notified。
+    """
+    try:
+        batt = psutil.sensors_battery()
+        if batt is None:
+            return notified  # 非筆電環境，略過
+
+        pct = int(batt.percent)
+        plugged = batt.power_plugged
+
+        # 充電中 → 重置所有門檻
+        if plugged:
+            if notified:
+                log.info("已充電，重置電量警告門檻")
+            return set()
+
+        ts = now_str()
+        log.info(f"電量：{pct}%")
+
+        if pct <= BATTERY_CRITICAL_10 and BATTERY_CRITICAL_10 not in notified:
+            if is_user_active():
+                send_telegram(
+                    f"🪫 <b>電量剩 {pct}%！請立刻充電！</b>\n"
+                    f"偵測到有人正在使用，腳本繼續運行，但請趕快插電！\n時間：{ts}"
+                )
+            else:
+                send_telegram(
+                    f"🪫 <b>電量剩 {pct}%，筆電即將進入睡眠</b>\n"
+                    f"沒有偵測到使用者操作，腳本停止並讓筆電睡眠以保護電池。\n"
+                    f"充電後記得重新啟動腳本！\n時間：{ts}"
+                )
+                log.warning("電量過低且無人使用，進入睡眠")
+                release_lock()
+                time.sleep(3)
+                subprocess.run(["pmset", "sleepnow"])
+                sys.exit(0)
+            notified.add(BATTERY_CRITICAL_10)
+
+        elif pct <= BATTERY_WARN_15 and BATTERY_WARN_15 not in notified:
+            send_telegram(
+                f"🔋 <b>電量剩 {pct}%，快去充電！</b>\n"
+                f"剩下不多了，再不充電腳本會自動在 {BATTERY_CRITICAL_10}% 時停止。\n時間：{ts}"
+            )
+            notified.add(BATTERY_WARN_15)
+
+        elif pct <= BATTERY_WARN_30 and BATTERY_WARN_30 not in notified:
+            send_telegram(
+                f"🔋 <b>電量剩 {pct}%，記得充電喔！</b>\n"
+                f"刷票機器人還在努力幫你守著，幫它插個電吧～\n時間：{ts}"
+            )
+            notified.add(BATTERY_WARN_30)
+
+    except Exception as e:
+        log.warning(f"電量檢查失敗：{e}")
+
+    return notified
+
+
+def send_startup_notification():
+    ts = now_str()
+    msg = (
+        "🎉🎊 <b>嗨大家！刷票機器人已上線！</b> 🎊🎉\n\n"
+        "從現在開始我會幫你們緊緊盯著拓元售票頁面，\n"
+        "有票的話我會馬上大聲告訴你們！🚨\n\n"
+        "所以請放心去過你們美好的生活吧 💪\n"
+        "認真上班、好好吃飯、開心玩耍——\n"
+        "搶票的事交給我就好！\n\n"
+        "愛你們每一個人 🥰\n"
+        f"監控開始時間：{ts}"
+    )
+    send_telegram(msg)
+
+
 def setup_shutdown_handler():
     """收到系統關機/終止信號時，先發 Telegram 通知再結束"""
     def handler(signum, frame):
@@ -312,6 +417,7 @@ def main():
     setup_shutdown_handler()
     log.info(f"監控開始，目標：{TARGET_URL}")
     log.info(f"每 {CHECK_INTERVAL_SEC} 秒執行一次檢查，身障/輪椅區不通知")
+    send_startup_notification()
 
     driver = None
     if fetch_with_requests(TARGET_URL) is None:
@@ -325,10 +431,18 @@ def main():
     last_pity_time = start_time
 
     consecutive_fails = 0
+    battery_notified = set()
+    battery_check_counter = 0
 
     try:
         while True:
             wait_next()
+
+            # 每 4 次檢查（約 1 分鐘）確認一次電量
+            battery_check_counter += 1
+            if battery_check_counter >= 4:
+                battery_notified = check_battery(battery_notified)
+                battery_check_counter = 0
 
             try:
                 status, areas = check_once(driver)

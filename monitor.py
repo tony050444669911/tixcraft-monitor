@@ -125,7 +125,21 @@ def fetch_with_selenium(url: str, driver=None):
         time.sleep(1)
         return driver.page_source
     except Exception as e:
-        log.error(f"selenium 抓取失敗：{e}")
+        log.error(f"selenium 抓取失敗（session 可能已壞）：{e}")
+        return None
+
+
+def restart_driver(old_driver):
+    """Chrome session 壞掉時重建"""
+    try:
+        old_driver.quit()
+    except Exception:
+        pass
+    log.info("重新啟動 Chrome...")
+    try:
+        return create_driver()
+    except Exception as e:
+        log.error(f"Chrome 重啟失敗：{e}")
         return None
 
 
@@ -250,6 +264,9 @@ def check_once(driver=None):
     return parse_status(html)
 
 
+FAIL_STATUS = "抓取失敗"
+
+
 def main():
     global last_status, last_ticket_time, last_pity_time
 
@@ -271,6 +288,8 @@ def main():
     start_time = time.time()
     last_pity_time = start_time
 
+    consecutive_fails = 0
+
     try:
         while True:
             wait_until_check_second()
@@ -280,6 +299,18 @@ def main():
                 ts = now_str()
                 now_ts = time.time()
 
+                # Chrome 連續失敗 3 次 → 自動重建，不發通知
+                if status == FAIL_STATUS:
+                    consecutive_fails += 1
+                    log.warning(f"連續抓取失敗 {consecutive_fails} 次")
+                    if consecutive_fails >= 3 and driver is not None:
+                        log.info("Chrome 疑似崩潰，自動重建中...")
+                        driver = restart_driver(driver)
+                        consecutive_fails = 0
+                    continue
+
+                consecutive_fails = 0
+
                 area_summary = " | ".join(
                     a["name"] + (f" 剩{a['remaining']}" if a["remaining"] else "")
                     for a in areas[:3]
@@ -288,12 +319,11 @@ def main():
 
                 if status == "有票":
                     last_ticket_time = now_ts
-                    last_pity_time = now_ts  # 有票就重置憐憫計時
+                    last_pity_time = now_ts
                     msg = format_ticket_notification(areas, ts)
                     send_telegram(msg)
                     last_status = status
                 else:
-                    # 狀態變化通知
                     if last_status is None:
                         last_status = status
                         log.info(f"初始狀態：{status}")
@@ -305,7 +335,6 @@ def main():
                     else:
                         log.info("狀態無變化")
 
-                    # 連續 1 小時沒一般區票 → 憐憫通知
                     elapsed = now_ts - last_pity_time
                     if elapsed >= NO_TICKET_ALERT:
                         elapsed_hours = (now_ts - start_time) / 3600

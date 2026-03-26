@@ -1,5 +1,6 @@
 import os
 import re
+import sys
 import time
 import signal
 import logging
@@ -251,6 +252,37 @@ def check_once(driver=None):
 FAIL_STATUS = "抓取失敗"
 
 
+LOCK_FILE = "/tmp/tixcraft_monitor.lock"
+
+
+def acquire_lock():
+    """確保只有一個執行實例，防止重複通知"""
+    if os.path.exists(LOCK_FILE):
+        with open(LOCK_FILE) as f:
+            old_pid = f.read().strip()
+        # 檢查舊的 PID 是否還活著
+        if old_pid and os.path.exists(f"/proc/{old_pid}"):
+            log.error(f"已有另一個執行中的實例（PID {old_pid}），退出")
+            sys.exit(0)
+        # macOS 用 kill -0 檢查 PID
+        try:
+            os.kill(int(old_pid), 0)
+            log.error(f"已有另一個執行中的實例（PID {old_pid}），退出")
+            sys.exit(0)
+        except (ProcessLookupError, ValueError):
+            pass  # 舊 PID 已不存在，繼續
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+    log.info(f"取得執行鎖（PID {os.getpid()}）")
+
+
+def release_lock():
+    try:
+        os.remove(LOCK_FILE)
+    except FileNotFoundError:
+        pass
+
+
 def setup_shutdown_handler():
     """收到系統關機/終止信號時，先發 Telegram 通知再結束"""
     def handler(signum, frame):
@@ -263,9 +295,10 @@ def setup_shutdown_handler():
         )
         log.warning("收到終止信號，發送停止通知...")
         send_telegram(msg)
+        release_lock()
         raise SystemExit(0)
 
-    signal.signal(signal.SIGTERM, handler)  # 系統關機、kill 指令
+    signal.signal(signal.SIGTERM, handler)
 
 
 def main():
@@ -275,6 +308,7 @@ def main():
         log.error("請確認 .env 已設定 TELEGRAM_BOT_TOKEN、TELEGRAM_CHAT_ID、TARGET_URL")
         return
 
+    acquire_lock()
     setup_shutdown_handler()
     log.info(f"監控開始，目標：{TARGET_URL}")
     log.info(f"每 {CHECK_INTERVAL_SEC} 秒執行一次檢查，身障/輪椅區不通知")
@@ -358,6 +392,7 @@ def main():
     except KeyboardInterrupt:
         log.info("使用者中斷，結束監控")
     finally:
+        release_lock()
         if driver:
             driver.quit()
             log.info("Chrome 已關閉")

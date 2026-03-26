@@ -14,7 +14,7 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 TARGET_URL = os.getenv("TARGET_URL")
 
-CHECK_SECOND = 50        # 每分鐘第幾秒執行檢查
+CHECK_INTERVAL_SEC = 15  # 每幾秒檢查一次
 NO_TICKET_ALERT = 3600  # 連續幾秒沒票就發憐憫通知（1 小時）
 
 # 身障/輪椅區關鍵字 → 忽略這些區域
@@ -234,17 +234,9 @@ def format_pity(elapsed_hours: float, ts: str) -> str:
     )
 
 
-def wait_until_check_second():
-    """等到下一個整分鐘的第 CHECK_SECOND 秒"""
-    now = datetime.now()
-    current_second = now.second
-    if current_second < CHECK_SECOND:
-        wait = CHECK_SECOND - current_second
-    else:
-        wait = 60 - current_second + CHECK_SECOND
-    if wait > 0:
-        log.info(f"等待 {wait} 秒後於每分鐘第 {CHECK_SECOND} 秒執行檢查...")
-        time.sleep(wait)
+def wait_next():
+    log.info(f"等待 {CHECK_INTERVAL_SEC} 秒後執行下一次檢查...")
+    time.sleep(CHECK_INTERVAL_SEC)
 
 
 def check_once(driver=None):
@@ -285,7 +277,7 @@ def main():
 
     setup_shutdown_handler()
     log.info(f"監控開始，目標：{TARGET_URL}")
-    log.info(f"每分鐘第 {CHECK_SECOND} 秒執行檢查，身障/輪椅區不通知")
+    log.info(f"每 {CHECK_INTERVAL_SEC} 秒執行一次檢查，身障/輪椅區不通知")
 
     driver = None
     if fetch_with_requests(TARGET_URL) is None:
@@ -302,7 +294,7 @@ def main():
 
     try:
         while True:
-            wait_until_check_second()
+            wait_next()
 
             try:
                 status, areas = check_once(driver)
